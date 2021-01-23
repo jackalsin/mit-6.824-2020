@@ -19,5 +19,35 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+type MapperTask struct {
+	TaskID   int
+	FileName string
+}
 
+type ReducerTask struct {
+	ReducerID int
+	NMap      int
+}
+
+type GetTaskReply struct {
+	MapperTask  MapperTask
+	ReducerTask ReducerTask
+	NReduce     int
+}
+
+type GetTaskArgs struct {
+}
+
+type NotifyMapperJobDoneArgs struct {
+	TaskID int
+}
+
+type NotifyMapperJobDoneReply struct {
+}
+
+type NotifyReducerJobDoneArgs struct {
+	TaskID int
+}
+
+type NotifyReducerJobDoneReply struct {
+}
