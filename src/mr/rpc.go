@@ -11,13 +11,37 @@ package mr
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
+type MapperTask struct {
+	TaskID   int
+	FileName string
 }
 
-type ExampleReply struct {
-	Y int
+type ReducerTask struct {
+	ReducerID int // Reduce Job ID
+	TaskID    int // Task ID
+	NMap      int
 }
 
-// Add your RPC definitions here.
+type GetTaskReply struct {
+	MapperTask  MapperTask
+	ReducerTask ReducerTask
+	NReduce     int
+}
 
+type GetTaskArgs struct {
+}
+
+type NotifyMapperJobDoneArgs struct {
+	TaskID int
+}
+
+type NotifyMapperJobDoneReply struct {
+}
+
+type NotifyReducerJobDoneArgs struct {
+	ReducerID int
+	TaskID    int
+}
+
+type NotifyReducerJobDoneReply struct {
+}
