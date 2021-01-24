@@ -17,7 +17,7 @@ type Master struct {
 	nReduce               int
 	mapperTaskPendingMap  map[int]*masterTask
 	reducerTaskPendingMap map[int]*masterTask
-	nextTaskID            int
+	nextReducerTaskID     int
 }
 
 type masterTask struct {
@@ -38,19 +38,19 @@ func (m *Master) NotifyMapperJobDone(args *NotifyMapperJobDoneArgs, reply *Notif
 func (m *Master) NotifyReducerJobDone(args *NotifyReducerJobDoneArgs, reply *NotifyReducerJobDoneReply) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	log.Println("Received reducer job", args.TaskID, "done")
-	m.reducerTaskPendingMap[args.TaskID].isCompleted = true
+	log.Println("Received reducer job done. ReducerID =", args.ReducerID, "TaskID = ", args.TaskID)
+	if args.TaskID != m.reducerTaskPendingMap[args.ReducerID].reducerTask.TaskID {
+		log.Println("Ignoring notify reducer job done due to reducerID =", args.ReducerID, "expecting taskID =", m.reducerTaskPendingMap[args.ReducerID].reducerTask.TaskID, "but args.TaskID =", args.TaskID)
+		return nil
+	}
+	m.reducerTaskPendingMap[args.ReducerID].isCompleted = true
 	return nil
 }
 
 func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	// if is working on
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	// clean unassigned first
 	mapperTask := m.getMapperTaskIfExist()
-	log.Println("Mapper Task", mapperTask)
+	log.Println("Mapper Task", mapperTask, time.Now())
 	if mapperTask != (MapperTask{}) {
 		reply.NReduce = m.nReduce
 		reply.MapperTask = mapperTask
@@ -58,10 +58,11 @@ func (m *Master) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	}
 
 	reducerTask := m.getReducerTaskIfExist()
-	log.Println("Reducer Task", reducerTask)
+	log.Println("Reducer Task", reducerTask, time.Now())
 	if reducerTask != (ReducerTask{}) {
 		reply.NReduce = m.nReduce
 		reply.ReducerTask = reducerTask
+		log.Println("Reducer Task", reply.ReducerTask, reducerTask)
 		return nil
 	}
 	// return says you don't need to work any more.
@@ -87,9 +88,9 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	for i, task := range m.reducerTaskPendingMap {
+	for _, task := range m.reducerTaskPendingMap {
 		if !task.isCompleted {
-			log.Println("Found ", i, " is not completed.")
+			// log.Println("Found", i, "is not completed.")
 			return false
 		}
 	}
@@ -104,10 +105,13 @@ func (m *Master) getMapperTaskIfExist() MapperTask {
 			if !task.isCompleted {
 				isAllCompleted = false
 			}
+			m.mu.Lock()
 			if !task.isCompleted && task.time.Add(taskTimeOut).Before(time.Now()) {
 				task.time = time.Now()
+				m.mu.Unlock()
 				return task.mapperTask
 			}
+			m.mu.Unlock()
 		}
 		time.Sleep(time.Second)
 	}
@@ -122,10 +126,15 @@ func (m *Master) getReducerTaskIfExist() ReducerTask {
 			if !task.isCompleted {
 				isAllCompleted = false
 			}
+			m.mu.Lock()
 			if !task.isCompleted && task.time.Add(taskTimeOut).Before(time.Now()) {
 				task.time = time.Now()
+				m.nextReducerTaskID++
+				task.reducerTask.TaskID = m.nextReducerTaskID
+				m.mu.Unlock()
 				return task.reducerTask
 			}
+			m.mu.Unlock()
 		}
 		time.Sleep(time.Second)
 	}
@@ -158,7 +167,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 			},
 		}
 	}
-	log.Println("Initial State of Master ", m)
+	log.Println("Initial State of Master ", &m)
 	m.server()
 	return &m
 }

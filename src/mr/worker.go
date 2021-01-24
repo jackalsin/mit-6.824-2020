@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
-	"sort"
 )
 
 const (
@@ -86,12 +86,8 @@ func doMap(mapf func(string, string) []KeyValue, filename string, mapperID, nRed
 	result := make(map[int][]KeyValue)
 	writers := getMapperWriter(mapperID, nReducer)
 	keyValuePairs := mapf(filename, getFileContent(filename))
-	log.Println("Running for loop")
-	for i, wordToCount := range keyValuePairs {
+	for _, wordToCount := range keyValuePairs {
 		key := ihash(wordToCount.Key) % nReducer
-		if i == 0 {
-			log.Println(wordToCount)
-		}
 		result[key] = append(result[key], wordToCount)
 		enc := writers[key].Encoder
 		if err := enc.Encode(wordToCount); err != nil {
@@ -104,79 +100,51 @@ func doMap(mapf func(string, string) []KeyValue, filename string, mapperID, nRed
 }
 
 func doReduce(reducef func(string, []string) string, nReduce int, reducerTask ReducerTask) {
-	intermediateFileReaders := getIntermediateFileReader(reducerTask.NMap, reducerTask.ReducerID)
-	tmpFileName := fmt.Sprintf(outTmpFileFormat, reducerTask.ReducerID)
-	tmpFile, err := ioutil.TempFile(".", tmpFileName)
-	if err != nil {
-		log.Fatal("Error when creating ", tmpFileName, err)
-	}
-	for len(intermediateFileReaders) > 0 {
-		sort.Slice(intermediateFileReaders, func(i, j int) bool {
-			return intermediateFileReaders[i].KeyValue.Key < intermediateFileReaders[j].KeyValue.Key
-		})
-		fmt.Println("intermediateFileReaders =", intermediateFileReaders[0].KeyValue.Key)
-		toRemove := intermediateFileReaders[0]
-		prev := toRemove.KeyValue.Key
-		list := make([]string, 0)
-		for len(intermediateFileReaders) > 0 {
-			sort.Slice(intermediateFileReaders, func(i, j int) bool {
-				return intermediateFileReaders[i].KeyValue.Key < intermediateFileReaders[j].KeyValue.Key
-			})
-			toRemove := intermediateFileReaders[0]
-			if toRemove.KeyValue.Key != prev {
-				break
-			}
-			log.Println("Key", toRemove.KeyValue.Key)
-			intermediateFileReaders = intermediateFileReaders[1:]
-			list = append(list, toRemove.KeyValue.Value)
-			dec := toRemove.Decoder
+	result := make(map[string][]string)
+	for mapperID := 0; mapperID < reducerTask.NMap; mapperID++ {
+		intermediateFileName := fmt.Sprintf(intermediateFileFormat, mapperID, reducerTask.ReducerID)
+		intermediateFile, err := os.Open(intermediateFileName)
+		if err != nil {
+			log.Fatal("Cannot open file:", intermediateFile)
+		}
+		dec := json.NewDecoder(intermediateFile)
+		for {
 			var kv KeyValue
 			if err := dec.Decode(&kv); err != nil {
-				break
+				if err == io.EOF {
+					// log.Println("Finish reading file", intermediateFileName)
+					break
+				}
+				log.Fatal("Reading key value pair error", err)
 			}
-			toRemove.KeyValue = &kv
-			intermediateFileReaders = append(intermediateFileReaders, toRemove)
-		} // end inner loop
-		output := reducef(prev, list)
-		fmt.Fprintf(tmpFile, "%v %v\n", prev, output)
+			if result[kv.Key] == nil {
+				result[kv.Key] = make([]string, 0)
+			}
+			result[kv.Key] = append(result[kv.Key], kv.Value)
+		}
+		if err := intermediateFile.Close(); err != nil {
+			log.Fatal("Error in closing intermediate file ", intermediateFileName)
+		}
 	}
-	closeReducerReader(intermediateFileReaders)
+
+	tmpFileNamePattern := fmt.Sprintf(outTmpFileFormat, reducerTask.ReducerID)
+	tmpFile, err := ioutil.TempFile(".", tmpFileNamePattern)
+	if err != nil {
+		log.Fatal("Error when creating ", tmpFileNamePattern, err)
+	}
+	for key, value := range result {
+		count := reducef(key, value)
+		fmt.Fprintf(tmpFile, "%v %v\n", key, count)
+	}
 	if err := tmpFile.Close(); err != nil {
-		log.Fatal("Error when closing tmp file.", tmpFileName)
+		log.Fatal("Error when closing tmp file.", tmpFile.Name())
 	}
 	outFileName := fmt.Sprintf(outFileFormat, reducerTask.ReducerID)
-	os.Rename(tmpFileName, outFileName)
-	call(masterNotifyReducerJobDone, &NotifyReducerJobDoneArgs{TaskID: reducerTask.ReducerID}, &NotifyMapperJobDoneReply{})
-}
-
-func getIntermediateFileReader(nMap int, reducerID int) []fileDecoder {
-	result := make([]fileDecoder, 0)
-	for mapperID := 0; mapperID < nMap; mapperID++ {
-		fileName := fmt.Sprintf(intermediateFileFormat, mapperID, reducerID)
-		file, err := os.Open(fileName)
-		if err != nil {
-			log.Fatal("Cannot open file:", file)
-		}
-		dec := json.NewDecoder(file)
-		var kv KeyValue
-		if err := dec.Decode(&kv); err != nil {
-			log.Fatal("Reading key value pair error", err)
-			continue
-		}
-		result = append(result, fileDecoder{
-			File:     file,
-			Decoder:  dec,
-			KeyValue: &kv,
-		})
+	if err := os.Rename(tmpFile.Name(), outFileName); err != nil {
+		log.Fatal("err in renaming files", err)
 	}
-	return result
-}
-
-func closeReducerReader(readers []fileDecoder) {
-	for _, reader := range readers {
-		if err := reader.File.Close(); err != nil {
-			log.Fatal("Closing reader failure in ", reader, err)
-		}
+	if isSuccessful := call(masterNotifyReducerJobDone, &NotifyReducerJobDoneArgs{ReducerID: reducerTask.ReducerID, TaskID: reducerTask.TaskID}, &NotifyMapperJobDoneReply{}); !isSuccessful {
+		log.Fatalln("Error in notify reduce job done. Id =", reducerTask.ReducerID)
 	}
 }
 
@@ -213,7 +181,9 @@ func getFileContent(filename string) string {
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		log.Fatalln("Error in closing file", file)
+	}
 	return string(content)
 }
 
@@ -244,12 +214,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	log.Println("error in call", rpcname, err, args, reply)
 	return false
-}
-
-func logFatalIfError(e error) {
-	if e != nil {
-		log.Fatal(e)
-	}
 }

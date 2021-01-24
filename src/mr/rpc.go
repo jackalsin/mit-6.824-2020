@@ -11,21 +11,14 @@ package mr
 // and reply for an RPC.
 //
 
-type ExampleArgs struct {
-	X int
-}
-
-type ExampleReply struct {
-	Y int
-}
-
 type MapperTask struct {
 	TaskID   int
 	FileName string
 }
 
 type ReducerTask struct {
-	ReducerID int
+	ReducerID int // Reduce Job ID
+	TaskID    int // Task ID
 	NMap      int
 }
 
@@ -46,7 +39,8 @@ type NotifyMapperJobDoneReply struct {
 }
 
 type NotifyReducerJobDoneArgs struct {
-	TaskID int
+	ReducerID int
+	TaskID    int
 }
 
 type NotifyReducerJobDoneReply struct {
